@@ -2,23 +2,18 @@
 // ephemeral token required for the Gemini Live WebSocket connection.
 // It relies on the GEMINI_API_KEY environment variable set in Netlify.
 
-// We use the official Google Gen AI SDK
-import { GoogleGenAI } from "@google/genai";
+// We will use standard Node.js fetch for robustness instead of relying on a specific SDK version.
+// The base endpoint for token generation (using the public Gemini API infrastructure).
+const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
-// Initialize the GoogleGenAI instance. It automatically picks up
-// the GEMINI_API_KEY from environment variables on Netlify.
-const ai = new GoogleGenAI({});
-
-// The model ID must be specified for the token generation.
 const LIVE_MODEL_ID = "gemini-2.5-flash-live-preview";
+const MAX_TOKEN_DURATION_SECONDS = 1800; // 30 minutes
 
-// Maximum duration for the ephemeral token (in seconds, max 1800 for 30 min)
-const MAX_TOKEN_DURATION_SECONDS = 1800; 
-
-// The expected structure for the Netlify function handler
 export async function handler(event, context) {
+    const apiKey = process.env.GEMINI_API_KEY;
+
     // 1. Check for API Key availability (for safety)
-    if (!process.env.GEMINI_API_KEY) {
+    if (!apiKey) {
         console.error("GEMINI_API_KEY environment variable is not set.");
         return {
             statusCode: 500,
@@ -35,18 +30,31 @@ export async function handler(event, context) {
     }
 
     try {
-        // 3. Generate the Ephemeral Token
-        // This method generates a token required to connect to the Live WebSocket API.
-        const tokenResponse = await ai.generateContentAsEphemeralToken({
-            model: LIVE_MODEL_ID,
+        // 3. Construct the API URL and Payload
+        const url = `${BASE_TOKEN_URL}/${LIVE_MODEL_ID}:generateContentAsEphemeralToken?key=${apiKey}`;
+        
+        const payload = {
             durationSeconds: MAX_TOKEN_DURATION_SECONDS,
-            // The Live API automatically applies the Live URL/config to the token.
+        };
+
+        // 4. Send the POST request to generate the ephemeral token
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
         });
 
-        const ephemeralToken = tokenResponse.token;
-        const webSocketUrl = tokenResponse.url; // The direct WebSocket URL
+        // 5. Handle response status
+        if (!response.ok) {
+            const errorBody = await response.json().catch(() => ({}));
+            throw new Error(`API Token Generation Failed: ${response.status} - ${JSON.stringify(errorBody)}`);
+        }
 
-        // 4. Return the token and URL securely
+        const tokenResponse = await response.json();
+        const ephemeralToken = tokenResponse.token;
+        const webSocketUrl = tokenResponse.url;
+
+        // 6. Return the token and URL securely
         return {
             statusCode: 200,
             headers: {
