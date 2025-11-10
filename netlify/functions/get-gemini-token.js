@@ -1,100 +1,115 @@
 // netlify/functions/get-gemini-token.js
-// Purpose: Generate ephemeral token for Gemini Live using the most reliable public v1beta endpoint structure.
+// Generate ephemeral Gemini "live" token via Generative Language API (v1alpha)
+// Env var: GEMINI_API_KEY (preferred) OR GEMINI_BEARER_TOKEN (optional, if you use OAuth)
+// NOTE: Do NOT commit your keys to source control.
 
-const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta";
-const TARGET_LIVE_MODEL_ID = "gemini-2.5-flash-live-preview";
-const MAX_TOKEN_DURATION_SECONDS = 1800; // 30 minutes
+const DEFAULT_MAX_TOKEN_SECONDS = 600; // 10 minutes default
 
-export async function handler(event) {
-  // Allow GET/POST only
-  if (event.httpMethod !== "GET" && event.httpMethod !== "POST") {
-    return { statusCode: 405, body: JSON.stringify({ error: "Method Not Allowed" }) };
-  }
-
-  // Handle CORS pre-flight requests
-  if (event.httpMethod === 'OPTIONS') {
-    return {
-        statusCode: 200,
-        headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-        },
-        body: ''
-    };
-  }
-
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("Missing GEMINI_API_KEY env var");
-    return { statusCode: 500, body: JSON.stringify({ error: "Server error: Missing GEMINI_API_KEY" }) };
-  }
-
-  // Correct URL structure for Gemini Live API token generation
-  const url = `${BASE_TOKEN_URL}/models/${TARGET_LIVE_MODEL_ID}:generateToken?key=${encodeURIComponent(apiKey)}`;
-
-  // Simple payload for ephemeral token generation
-  const payload = {
-    ttlSeconds: MAX_TOKEN_DURATION_SECONDS
+exports.handler = async function (event, context) {
+  const CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "OPTIONS, POST, GET",
   };
 
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
+  }
+
   try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    const raw = await resp.text().catch(() => "");
-
-    if (!resp.ok) {
-      console.error("API Token Generation Failed:", resp.status, raw);
+    // Read env vars (user specified GEMINI_API_KEY)
+    const API_KEY = process.env.GEMINI_API_KEY;
+    
+    if (!API_KEY && !BEARER) {
+      console.error("Missing GEMINI_API_KEY and GEMINI_BEARER_TOKEN env vars");
       return {
         statusCode: 500,
-        body: JSON.stringify({
-          error: "API Token Generation Failed",
-          status: resp.status,
-          raw_response_text: raw || null
-        })
+        headers: CORS_HEADERS,
+        body: JSON.stringify({ error: "Server misconfiguration: API key not set" }),
       };
     }
 
-    let tokenResponse;
-    try {
-      tokenResponse = JSON.parse(raw || "{}");
-    } catch (e) {
-      console.error("Failed to parse JSON token response, raw:", raw);
-      return { statusCode: 500, body: JSON.stringify({ error: "Invalid JSON from token endpoint", raw }) };
+    // endpoint + model
+    const BASE_URL = "https://generativelanguage.googleapis.com/v1alpha";
+    const TARGET_LIVE_MODEL_ID = "gemini-live-2.5-flash-preview";
+    const maxTokenSeconds = Number(process.env.MAX_TOKEN_SECONDS) || DEFAULT_MAX_TOKEN_SECONDS;
+    const expireTime = new Date(Date.now() + maxTokenSeconds * 1000).toISOString();
+
+    const requestBody = {
+      authToken: {
+        liveConnectConstraints: { model: TARGET_LIVE_MODEL_ID },
+        expireTime,
+      },
+    };
+
+    const url = BEARER && BEARER.length > 0
+      ? `${BASE_URL}/authTokens:create`
+      : `${BASE_URL}/authTokens:create?key=${encodeURIComponent(API_KEY)}`;
+
+    const headers = { "Content-Type": "application/json" };
+    if (BEARER && BEARER.length > 0) headers["Authorization"] = `Bearer ${BEARER}`;
+
+    const fetchResp = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+    });
+
+    const rawText = await fetchResp.text();
+    let parsed;
+    try { parsed = rawText ? JSON.parse(rawText) : {}; } catch (e) { parsed = { rawText }; }
+
+    if (!fetchResp.ok) {
+      console.error(
+        "AuthToken create failed",
+        "status:", fetchResp.status,
+        "statusText:", fetchResp.statusText,
+        "responsePreview:", typeof parsed === "object" ? parsed : String(parsed).slice(0, 300)
+      );
+
+      return {
+        statusCode: 502,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          error: "API Token Generation Failed",
+          status: fetchResp.status,
+          detail: parsed,
+        }),
+      };
     }
 
-    const ephemeralToken = tokenResponse.token ?? tokenResponse.name ?? tokenResponse.authToken ?? null;
+    const token =
+      parsed?.authToken?.name ||
+      parsed?.authToken?.token ||
+      parsed?.token ||
+      parsed?.name ||
+      null;
 
-    if (!ephemeralToken) {
-      console.error("Token not present in tokenResponse:", tokenResponse);
-      return { statusCode: 500, body: JSON.stringify({ error: "Missing token in response", tokenResponse }) };
+    if (!token) {
+      console.warn("No token field found in response; returning full response for inspection");
+      return {
+        statusCode: 200,
+        headers: CORS_HEADERS,
+        body: JSON.stringify({
+          message: "No standard token field found in upstream response — inspect `rawResponse`",
+          rawResponse: parsed,
+        }),
+      };
     }
 
-    // Construct the WebSocket URL for Gemini Live API
-    const websocketUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent`;
+    const expiresAt = parsed?.authToken?.expireTime || parsed?.expireTime || expireTime || null;
 
     return {
       statusCode: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
-      },
-      body: JSON.stringify({
-        token: ephemeralToken,
-        websocketUrl: websocketUrl,
-        targetLiveModel: TARGET_LIVE_MODEL_ID,
-        expiresInSeconds: MAX_TOKEN_DURATION_SECONDS,
-        rawResponse: tokenResponse
-      })
+      headers: CORS_HEADERS,
+      body: JSON.stringify({ ephemeralToken: token, expiresAt }),
     };
   } catch (err) {
-    console.error("Unhandled error generating token:", err);
-    return { statusCode: 500, body: JSON.stringify({ error: "Failed to generate token", detail: String(err) }) };
+    console.error("Unexpected error generating ephemeral token:", err);
+    return {
+      statusCode: 500,
+      headers: CORS_HEADERS,
+      body: JSON.stringify({ error: "Internal server error", detail: String(err) }),
+    };
   }
-}
+};
