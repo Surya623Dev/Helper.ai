@@ -1,93 +1,80 @@
 // netlify/functions/get-gemini-token.js
-// Generate an ephemeral token for Gemini Live by calling the stable model endpoint
-// and including a liveConfig payload that targets the Live model.
-//
-// Requirements:
-// - Set GEMINI_API_KEY in Netlify site environment variables
-// - Netlify uses Node 18+ (fetch available)
+// Purpose: Generate ephemeral token for Gemini Live using strict v1beta endpoint and fully-qualified model names.
 
 const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta/models";
-const TOKEN_GENERATION_MODEL_ID = "models/gemini-2.5-flash"; // verified available for your key
-const TARGET_LIVE_MODEL_ID = "models/gemini-2.5-flash-live-preview"; // the Live model you want to use
+const TOKEN_GENERATION_MODEL_ID = "models/gemini-2.5-flash"; // verified in your model list
+const TARGET_LIVE_MODEL_ID = "models/gemini-2.5-flash-live-preview"; // fully-qualified live model
 const MAX_TOKEN_DURATION_SECONDS = 1800; // 30 minutes
 
-export async function handler(event, context) {
-  // Allow only GET or POST
+export async function handler(event) {
+  // Allow GET/POST only
   if (event.httpMethod !== "GET" && event.httpMethod !== "POST") {
-    return {
-      statusCode: 405,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Method Not Allowed" }),
-    };
+    return { statusCode: 405, body: JSON.stringify({ error: "Method Not Allowed" }) };
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.error("Missing GEMINI_API_KEY environment variable.");
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: "Server configuration error: Missing API Key" }),
-    };
+    console.error("Missing GEMINI_API_KEY env var");
+    return { statusCode: 500, body: JSON.stringify({ error: "Server error: Missing GEMINI_API_KEY" }) };
   }
 
-  try {
-    // Build URL (use the stable model that exists for your key)
-    const url = `${BASE_TOKEN_URL}/${encodeURIComponent(TOKEN_GENERATION_MODEL_ID)}:generateContentAsEphemeralToken?key=${encodeURIComponent(apiKey)}`;
+  const url = `${BASE_TOKEN_URL}/${encodeURIComponent(TOKEN_GENERATION_MODEL_ID)}:generateContentAsEphemeralToken?key=${encodeURIComponent(apiKey)}`;
 
-    // Construct payload with liveConfig to indicate this token is for a Live websocket connection.
-    // The audio config below is 16kHz PCM (linear16) which is commonly required for Live voice streams.
-    const payload = {
-      durationSeconds: MAX_TOKEN_DURATION_SECONDS,
-      // liveConfig tells the token issuer the intended live usage and constraints
-      liveConfig: {
-        // The actual Live model identifier (this may be a different "live" alias)
-        model: TARGET_LIVE_MODEL_ID,
-        // Audio config for microphone streaming: 16kHz, PCM linear16
-        audio: {
-          encoding: "linear16",      // PCM 16-bit little-endian
-          sampleRateHertz: 16000
-        },
-        // Optionally restrict returned modalities (TEXT, AUDIO, etc).
-        // responseModalities: ["TEXT"]
+  // Strict payload shape for ephemeral token generation + live usage
+  const payload = {
+    // token lifetime
+    durationSeconds: MAX_TOKEN_DURATION_SECONDS,
+    // liveConfig instructs the token to be used for a Live websocket session
+    liveConfig: {
+      model: TARGET_LIVE_MODEL_ID,
+      audio: {
+        encoding: "linear16",
+        sampleRateHertz: 16000
       },
-    };
+      // If you want to constrain response modalities, add them here:
+      // responseModalities: ["TEXT", "AUDIO"]
+    }
+  };
 
+  try {
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
 
-    // If not OK, try to capture the body (json or text) for debugging
+    // Capture raw body for debugging even if empty
+    const raw = await resp.text().catch(() => "");
+
     if (!resp.ok) {
-      let errBody;
-      try { errBody = await resp.json(); } catch { errBody = await resp.text().catch(() => null); }
-      console.error("API Token Generation Failed:", resp.status, errBody);
+      // log status + raw body (so you don't get "null")
+      console.error("API Token Generation Failed:", resp.status, raw);
       return {
         statusCode: 500,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error: "API Token Generation Failed", status: resp.status, detail: errBody }),
+        body: JSON.stringify({
+          error: "API Token Generation Failed",
+          status: resp.status,
+          raw_response_text: raw || null
+        })
       };
     }
 
-    // Parse success response
+    // Try parse JSON success response; if parse fails, return raw text for debugging
     let tokenResponse;
-    try { tokenResponse = await resp.json(); } catch (e) {
-      const raw = await resp.text().catch(() => "");
-      console.error("Failed to parse JSON token response:", raw);
+    try {
+      tokenResponse = JSON.parse(raw || "{}");
+    } catch (e) {
+      console.error("Failed to parse JSON token response, raw:", raw);
       return { statusCode: 500, body: JSON.stringify({ error: "Invalid JSON from token endpoint", raw }) };
     }
 
-    // Common response field names: token, name, url
+    // Common fields may be token, name, url
     const ephemeralToken = tokenResponse.token ?? tokenResponse.name ?? tokenResponse.authToken ?? null;
     const webSocketUrl = tokenResponse.url ?? tokenResponse.websocketUrl ?? null;
 
     if (!ephemeralToken) {
-      console.error("Token response missing token field:", tokenResponse);
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: "Missing token in response", tokenResponse }),
-      };
+      console.error("Token not present in tokenResponse:", tokenResponse);
+      return { statusCode: 500, body: JSON.stringify({ error: "Missing token in response", tokenResponse }) };
     }
 
     return {
@@ -96,22 +83,19 @@ export async function handler(event, context) {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type"
       },
       body: JSON.stringify({
         token: ephemeralToken,
-        websocketUrl: webSocketUrl,
+        websocketUrl,
         modelId: TOKEN_GENERATION_MODEL_ID,
         targetLiveModel: TARGET_LIVE_MODEL_ID,
         expiresInSeconds: MAX_TOKEN_DURATION_SECONDS,
-        rawResponse: tokenResponse // keep for debugging; remove for production
-      }),
+        rawResponse: tokenResponse // useful for debugging; remove in production
+      })
     };
   } catch (err) {
     console.error("Unhandled error generating token:", err);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: "Failed to generate token", detail: String(err) }),
-    };
+    return { statusCode: 500, body: JSON.stringify({ error: "Failed to generate token", detail: String(err) }) };
   }
 }
