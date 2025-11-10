@@ -8,7 +8,7 @@
 
 const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const TOKEN_GENERATION_MODEL_ID = "models/gemini-2.5-flash"; // verified available for your key
-const TARGET_LIVE_MODEL_ID = "gemini-2.5-flash-live-preview"; // the Live model you want to use
+const TARGET_LIVE_MODEL_ID = "models/gemini-2.5-flash-live-preview"; // the Live model you want to use
 const MAX_TOKEN_DURATION_SECONDS = 1800; // 30 minutes
 
 export async function handler(event, context) {
