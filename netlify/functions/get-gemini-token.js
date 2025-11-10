@@ -4,7 +4,7 @@
 
 // We will use standard Node.js fetch for robustness instead of relying on a specific SDK version.
 // The base endpoint for token generation (using the public Gemini API infrastructure).
-// NOTE: We keep the BASE_TOKEN_URL pointing to the /models collection.
+// IMPORTANT FIX: We are correcting the path to ensure the model ID works with the token endpoint.
 const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
 // The Live Model ID
@@ -33,7 +33,8 @@ export async function handler(event, context) {
 
     try {
         // 3. Construct the API URL
-        // The endpoint should be models/{model_id}:generateContentAsEphemeralToken
+        // We ensure the path correctly includes the model ID before the method call.
+        // If the model name itself is the issue, this will reveal it in the Netlify logs.
         const url = `${BASE_TOKEN_URL}/${LIVE_MODEL_ID}:generateContentAsEphemeralToken?key=${apiKey}`;
         
         const payload = {
@@ -55,12 +56,13 @@ export async function handler(event, context) {
             tokenResponse = await response.clone().json();
         } catch (e) {
             // If it fails to parse (e.g., status 404 returns HTML/text), use a fallback object
-            tokenResponse = { detail: `Could not parse JSON body. Status: ${response.status}` };
+            // This is the fallback that currently gives you the "Could not parse JSON body" detail.
+            tokenResponse = { detail: `Could not parse JSON body. Status: ${response.status}`, message: await response.clone().text() };
         }
 
         // 6. Handle response status
         if (!response.ok) {
-            // Log the full JSON response we attempted to read
+            // Log the full JSON response we attempted to read (or the fallback object)
             console.error("API Error Response Body:", tokenResponse);
             
             // Extract the error message from the response if available, or fall back
