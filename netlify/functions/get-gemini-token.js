@@ -2,6 +2,7 @@
 // ephemeral token required for the Gemini Live WebSocket connection.
 // It relies on the GEMINI_API_KEY environment variable set in Netlify.
 
+// We use the official Google Gen AI SDK
 import { GoogleGenAI } from "@google/genai";
 
 // Initialize the GoogleGenAI instance. It automatically picks up
@@ -35,7 +36,8 @@ export async function handler(event, context) {
 
     try {
         // 3. Generate the Ephemeral Token
-        const tokenResponse = await ai.generativeModel.generateContentAsEphemeralToken({
+        // This method generates a token required to connect to the Live WebSocket API.
+        const tokenResponse = await ai.generateContentAsEphemeralToken({
             model: LIVE_MODEL_ID,
             durationSeconds: MAX_TOKEN_DURATION_SECONDS,
             // The Live API automatically applies the Live URL/config to the token.
@@ -62,10 +64,14 @@ export async function handler(event, context) {
             }),
         };
     } catch (error) {
-        console.error("Error generating ephemeral token:", error.message);
+        // Logging the error structure to help with further debugging
+        console.error("Error generating ephemeral token:", error.message, "Full Error:", error); 
         return {
             statusCode: 500,
-            body: JSON.stringify({ error: "Failed to generate token", detail: error.message }),
+            body: JSON.stringify({ 
+                error: "Failed to generate token", 
+                detail: error.message 
+            }),
         };
     }
 }
