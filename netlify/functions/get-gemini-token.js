@@ -19,6 +19,7 @@ exports.handler = async function (event, context) {
   try {
     // Read env vars (user specified GEMINI_API_KEY)
     const API_KEY = process.env.GEMINI_API_KEY;
+    const BEARER = process.env.GEMINI_BEARER_TOKEN;
     
     if (!API_KEY && !BEARER) {
       console.error("Missing GEMINI_API_KEY and GEMINI_BEARER_TOKEN env vars");
