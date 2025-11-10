@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interview Co-Pilot</title>
+    <!-- Load Tailwind CSS for modern, minimal styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-dark': '#1e293b',
+                        'secondary-light': '#fef3c7', // Amber/yellow for contrast
+                        'gemini-blue': '#4285F4',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Essential styles for the overlay appearance */
+        body {
+            /* Full transparency for the wrapper */
+            background-color: transparent; 
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+            /* Make the body non-interactive, allowing clicks to pass through */
+            pointer-events: none; 
+        }
+
+        /* The main application container */
+        #app-container {
+            /* Allow the container to be interacted with for controls, but keep others click-through */
+            pointer-events: auto; 
+            max-width: 400px;
+            margin-left: auto; /* Position to the right side of the screen */
+            margin-right: 1rem;
+            margin-top: 1rem;
+            position: fixed; /* Keep it always in the same place */
+            top: 0;
+            right: 0;
+        }
+
+        /* Keep the actual content box visible and interactive */
+        #content-box {
+            background-color: rgba(30, 41, 59, 0.95); /* primary-dark with slight transparency */
+            border: 1px solid #4285F4;
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.5);
+            min-height: 100px;
+        }
+
+        /* Styling for the structured bullet points */
+        #suggestions-list li {
+            padding-left: 1.5rem;
+            text-indent: -1.5rem;
+            list-style: none; /* Remove default bullet */
+        }
+        #suggestions-list li::before {
+            content: "•"; /* Custom bullet point */
+            color: #4285F4; /* Gemini Blue */
+            font-weight: bold;
+            display: inline-block;
+            width: 1.5rem;
+        }
+
+        /* Animation for status changes */
+        .fade-in {
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+
+<div id="app-container">
+    <!-- Status and Controls (Interactive) -->
+    <div class="p-2 flex justify-between items-center rounded-t-lg bg-gemini-blue text-white shadow-lg">
+        <div class="flex items-center space-x-2">
+            <svg id="mic-icon" class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path d="M10 8a3 3 0 100-6 3 3 0 000 6zM3.465 14.493a1.264 1.264 0 001.03-.003 6.94 6.94 0 0110.99 0 1.264 1.264 0 001.03.003c.725.093 1.22-.05 1.517-.22A3 3 0 0020 12c0-1.87-1.428-3.41-3.235-3.807A5.947 5.947 0 0010 7a5.947 5.947 0 00-6.765 1.193C1.428 8.59 0 10.13 0 12a3 3 0 001.018 2.27c.297.17.792.313 1.517.22z"></path>
+            </svg>
+            <span id="status-message" class="text-sm font-semibold">Initializing...</span>
+        </div>
+        <button id="toggle-mic-btn" class="px-3 py-1 bg-white text-gemini-blue rounded-full text-xs font-bold hover:bg-gray-200">
+            Start
+        </button>
+    </div>
+
+    <!-- Content Box (Non-Intrusive, Click-Through) -->
+    <div id="content-box" class="p-4 rounded-b-lg shadow-2xl transition-all duration-300">
+        <!-- Transcription Display -->
+        <p id="transcription-output" class="text-secondary-light text-sm italic mb-2 min-h-[20px] fade-in" style="opacity: 0.7;"></p>
+        
+        <!-- Suggestions Display -->
+        <div id="suggestions-container" class="mt-2 hidden">
+            <p class="text-gemini-blue text-xs font-bold mb-1 uppercase">Co-Pilot Suggestions</p>
+            <ul id="suggestions-list" class="text-white text-base leading-relaxed">
+                <!-- LLM suggestions stream here -->
+            </ul>
+            <div id="loading-indicator" class="mt-3 text-center text-sm text-gemini-blue hidden">
+                Generating response...
+            </div>
+        </div>
+
+        <p id="initial-message" class="text-gray-400 text-sm text-center py-4">
+            Awaiting session start. Click 'Start' and grant microphone access.
+        </p>
+    </div>
+</div>
+
+<script type="module">
+    // --- Configuration & Constants ---
+    // !!! IMPORTANT: REPLACE THIS PLACEHOLDER URL !!!
+    // It should point to your deployed Netlify Function endpoint.
+    const NETLIFY_FUNCTION_URL = "YOUR_NETLIFY_SITE_URL/.netlify/functions/get-gemini-token"; 
+
+    const TARGET_SAMPLE_RATE = 16000; // Gemini Live API requires 16kHz
+    const FRAME_SIZE = 1024; // Audio chunk size
+
+    // The System Instruction is CRITICAL for enforcing the structured, bulleted output.
+    const SYSTEM_INSTRUCTION_PROMPT = `
+        You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interview conversation, focusing on the interviewer's questions and the candidate's context.
+
+        When the interviewer finishes a complete question (indicated by the Voice Activity Detection signal), you MUST generate a response that provides 3 to 5 concise, structured suggestions for the candidate.
+
+        **Output Constraints (MUST follow strictly):**
+        1.  **Format:** Output MUST be a bulleted list of 3 to 5 points. Use standard markdown bullet points (*).
+        2.  **Conciseness:** Each point MUST be a short, clear phrase or sentence (max 15 words per bullet).
+        3.  **Content Focus:** Suggestions MUST focus on key technical points, soft skills (like communication, clarity, or STAR method alignment), or crucial details the candidate should add next to strengthen their answer.
+
+        Example: If the question is about "how to design a scalable microservice," suggestions might be:
+        * Discuss load balancing and service mesh implementation.
+        * Mention asynchronous communication (e.g., Kafka).
+        * Structure your answer using the STAR method.
+    `;
+
+    // --- DOM Elements ---
+    const statusMessage = document.getElementById('status-message');
+    const toggleMicBtn = document.getElementById('toggle-mic-btn');
+    const micIcon = document.getElementById('mic-icon');
+    const transcriptionOutput = document.getElementById('transcription-output');
+    const suggestionsContainer = document.getElementById('suggestions-container');
+    const suggestionsList = document.getElementById('suggestions-list');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    const initialMessage = document.getElementById('initial-message');
+
+    // --- State Management ---
+    let isStreaming = false;
+    let webSocket = null;
+    let audioContext = null;
+    let audioProcessor = null;
+    let mediaStream = null;
+    let currentTranscription = '';
+    let isGenerating = false;
+
+    // --- Utility Functions ---
+
+    /**
+     * Converts raw Float32 audio data from the Web Audio API to 
+     * 16-bit signed PCM, mono, and performs downsampling if necessary.
+     * @param {Float32Array} buffer - The raw audio buffer.
+     * @param {number} inputSampleRate - The sample rate of the input buffer.
+     * @returns {Int16Array} The 16kHz 16-bit PCM buffer.
+     */
+    function convertAndDownsampleAudio(buffer, inputSampleRate) {
+        if (inputSampleRate === TARGET_SAMPLE_RATE) {
+            // Direct conversion to Int16
+            const pcm16 = new Int16Array(buffer.length);
+            for (let i = 0; i < buffer.length; i++) {
+                // Scale Float32 (-1 to 1) to Int16 (-32768 to 32767)
+                pcm16[i] = Math.max(-1, Math.min(1, buffer[i])) * 0x7fff;
+            }
+            return pcm16;
+        }
+
+        // Downsampling required (e.g., 48kHz -> 16kHz)
+        const ratio = inputSampleRate / TARGET_SAMPLE_RATE;
+        const newLength = Math.round(buffer.length / ratio);
+        const downsampled = new Int16Array(newLength);
+
+        for (let i = 0; i < newLength; i++) {
+            // Simple linear interpolation for downsampling
+            const index = Math.round(i * ratio);
+            const value = buffer[index];
+            downsampled[i] = Math.max(-1, Math.min(1, value)) * 0x7fff;
+        }
+
+        return downsampled;
+    }
+
+    // --- LLM Interaction / WebSocket Logic ---
+
+    /**
+     * Fetches the ephemeral token from the Netlify function.
+     * @returns {Promise<{token: string, websocketUrl: string}>}
+     */
+    async function fetchEphemeralToken() {
+        statusMessage.textContent = 'Fetching secure token...';
+        try {
+            const response = await fetch(NETLIFY_FUNCTION_URL);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            return data;
+        } catch (error) {
+            console.error('Error fetching token:', error);
+            statusMessage.textContent = `Token Fetch Failed: ${error.message}. Check NETLIFY_FUNCTION_URL.`;
+            micIcon.classList.remove('text-gemini-blue');
+            throw error;
+        }
+    }
+
+    /**
+     * Initializes the WebSocket connection and sends the initial setup message.
+     * @param {string} token
+     * @param {string} url
+     */
+    function setupWebSocket(token, url) {
+        webSocket = new WebSocket(`${url}?access_token=${token}`);
+
+        webSocket.onopen = () => {
+            statusMessage.textContent = 'Connected. Sending configuration...';
+            initialMessage.classList.add('hidden');
+            
+            // 1. Send the FIRST MESSAGE: Configuration Payload
+            const setupPayload = {
+                audio_config: {
+                    sample_rate: TARGET_SAMPLE_RATE,
+                    encoding: "LINEAR16",
+                    // The API auto-detects English, but it's good practice to specify
+                    language_code: "en-US", 
+                },
+                llm_config: {
+                    model_id: "gemini-2.5-flash-live-preview", // Specified model
+                    system_instruction: SYSTEM_INSTRUCTION_PROMPT, // Critical system prompt
+                    // Optional: You can add tools (like Google Search) if needed, 
+                    // but for a fast Co-Pilot, stick to the base model's knowledge.
+                },
+            };
+
+            const firstMessage = {
+                bidiGenerateContentRealtimeInput: {
+                    liveConfig: setupPayload,
+                }
+            };
+            webSocket.send(JSON.stringify(firstMessage));
+            statusMessage.textContent = 'Listening for Interview Audio...';
+            micIcon.classList.add('text-gemini-blue');
+            isStreaming = true;
+        };
+
+        webSocket.onmessage = handleWebSocketMessage;
+
+        webSocket.onclose = () => {
+            statusMessage.textContent = 'Disconnected. Click Start to restart.';
+            micIcon.classList.remove('text-gemini-blue');
+            cleanUp();
+        };
+
+        webSocket.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+            statusMessage.textContent = 'Connection Error. See console.';
+            micIcon.classList.remove('text-gemini-blue');
+            webSocket.close();
+        };
+    }
+
+    /**
+     * Handles incoming messages from the Gemini Live API.
+     * @param {MessageEvent} event 
+     */
+    function handleWebSocketMessage(event) {
+        try {
+            const response = JSON.parse(event.data);
+            const liveOutput = response.bidiGenerateContentRealtimeOutput;
+
+            if (!liveOutput) return;
+
+            // --- 1. Handle Transcription/Input (STT) ---
+            if (liveOutput.liveTranscription) {
+                const transcript = liveOutput.liveTranscription.text;
+                const isFinal = liveOutput.liveTranscription.is_final;
+                
+                if (transcript) {
+                    currentTranscription = transcript;
+                    transcriptionOutput.textContent = isFinal ? transcript : transcript + '...';
+                }
+            }
+
+            // --- 2. Handle Voice Activity Detection (VAD) / Intent ---
+            // The signal for when the LLM should respond is typically:
+            // 1. VAD indicates the interviewer stopped talking (or a complete question was detected).
+            if (liveOutput.voiceActivity) {
+                // A common pattern is to trigger LLM generation when VAD indicates 
+                // end of speech (e.g., 'end of utterance' signal) AND the LLM hasn't already started.
+                if (liveOutput.voiceActivity.utterance_state === 'END' && !isGenerating) {
+                    // Assuming 'END' signifies a pause long enough to trigger a response.
+                    statusMessage.textContent = 'Interviewer paused. Generating Co-Pilot suggestion...';
+                    suggestionsContainer.classList.remove('hidden');
+                    loadingIndicator.classList.remove('hidden');
+                    suggestionsList.innerHTML = '';
+                    isGenerating = true;
+                }
+                
+                // If a new utterance starts and we are generating, clear the old suggestions
+                if (liveOutput.voiceActivity.utterance_state === 'START' && isGenerating) {
+                    suggestionsContainer.classList.add('hidden');
+                    loadingIndicator.classList.add('hidden');
+                    suggestionsList.innerHTML = '';
+                    isGenerating = false;
+                }
+            }
+
+            // --- 3. Handle Streaming LLM Response ---
+            if (liveOutput.liveGeneration && isGenerating) {
+                const text = liveOutput.liveGeneration.text_update || '';
+                const isDone = liveOutput.liveGeneration.is_done;
+
+                if (text) {
+                    loadingIndicator.classList.add('hidden');
+                    
+                    // Simple parsing of the bulleted list as it streams
+                    // This is robust for streaming output where the response might arrive split at bullets
+                    const currentHtml = suggestionsList.innerHTML;
+                    const combinedText = currentHtml.replace(/<li>•\s*/g, '• ') + text;
+                    
+                    // Split by the bullet point character and re-render the list
+                    const points = combinedText.split(/\*\s*|\•\s*/).map(p => p.trim()).filter(p => p.length > 0);
+                    
+                    suggestionsList.innerHTML = points.map(p => `<li>${p}</li>`).join('');
+                }
+
+                if (isDone) {
+                    isGenerating = false;
+                    statusMessage.textContent = 'Listening for Interview Audio...';
+                }
+            }
+
+        } catch (error) {
+            console.error('Error handling WebSocket message:', error);
+        }
+    }
+
+
+    // --- Audio Processing Logic (Phase 2) ---
+
+    /**
+     * Initializes microphone and audio processing chain.
+     */
+    async function startAudioProcessing() {
+        try {
+            // 1. Get microphone stream
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            // 2. Initialize AudioContext and setup nodes
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const mediaStreamSource = audioContext.createMediaStreamSource(mediaStream);
+            
+            // ScriptProcessorNode is deprecated but widely supported for this use case
+            // Use an appropriate buffer size (e.g., 4096)
+            audioProcessor = audioContext.createScriptProcessor(FRAME_SIZE, 1, 1);
+            
+            // 3. Audio Processing Handler: converts, downsamples, and streams audio
+            audioProcessor.onaudioprocess = (event) => {
+                if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+                    // Get the raw audio data (Float32Array)
+                    const rawBuffer = event.inputBuffer.getChannelData(0); 
+                    
+                    // Convert to 16-bit PCM at 16kHz
+                    const pcm16Data = convertAndDownsampleAudio(rawBuffer, audioContext.sampleRate);
+                    
+                    // Send as a binary message (ArrayBuffer)
+                    const audioPayload = {
+                        bidiGenerateContentRealtimeInput: {
+                            audio: {
+                                audioBytes: pcm16Data.buffer // Send the raw PCM ArrayBuffer
+                            }
+                        }
+                    };
+                    
+                    // The Gemini Live API expects the audio in the `audio` field of the message
+                    webSocket.send(JSON.stringify(audioPayload));
+                }
+            };
+
+            // 4. Connect the nodes
+            mediaStreamSource.connect(audioProcessor);
+            audioProcessor.connect(audioContext.destination);
+
+        } catch (error) {
+            console.error('Error starting audio processing:', error);
+            statusMessage.textContent = `Mic Error: ${error.name}. Grant permission to microphone.`;
+            micIcon.classList.remove('text-gemini-blue');
+            cleanUp();
+            throw error;
+        }
+    }
+
+    /**
+     * Cleans up all audio and network resources.
+     */
+    function cleanUp() {
+        // Stop audio stream tracks
+        if (mediaStream) {
+            mediaStream.getTracks().forEach(track => track.stop());
+            mediaStream = null;
+        }
+        // Disconnect audio nodes
+        if (audioProcessor) {
+            audioProcessor.disconnect();
+            audioProcessor = null;
+        }
+        if (audioContext && audioContext.state !== 'closed') {
+            audioContext.close().catch(e => console.error("Error closing AudioContext:", e));
+            audioContext = null;
+        }
+        // Close WebSocket
+        if (webSocket) {
+            webSocket.close();
+            webSocket = null;
+        }
+        
+        isStreaming = false;
+        isGenerating = false;
+        toggleMicBtn.textContent = 'Start';
+        suggestionsContainer.classList.add('hidden');
+        suggestionsList.innerHTML = '';
+        transcriptionOutput.textContent = '';
+        currentTranscription = '';
+    }
+
+    // --- Main Control Function ---
+
+    /**
+     * Toggles the entire co-pilot session on and off.
+     */
+    async function toggleSession() {
+        if (isStreaming) {
+            statusMessage.textContent = 'Stopping session...';
+            cleanUp();
+            statusMessage.textContent = 'Session Stopped.';
+        } else {
+            // Start the session
+            try {
+                // 1. Fetch Token
+                const { token, websocketUrl } = await fetchEphemeralToken();
+
+                // 2. Start Audio Capture
+                await startAudioProcessing();
+
+                // 3. Setup WebSocket and Start Streaming
+                setupWebSocket(token, websocketUrl);
+                
+                toggleMicBtn.textContent = 'Stop';
+
+            } catch (error) {
+                // Error handling done in sub-functions, just clean up state
+                cleanUp(); 
+            }
+        }
+    }
+
+    // --- Event Listener ---
+    toggleMicBtn.addEventListener('click', toggleSession);
+
+    // Initial state setup on load
+    window.onload = () => {
+        statusMessage.textContent = 'Ready. Please enter Netlify Function URL.';
+        micIcon.classList.remove('text-gemini-blue');
+    };
+</script>
+
+</body>
+</html>

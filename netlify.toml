@@ -1,0 +1,17 @@
+[build]
+
+Optional: Define your public folder if you use one, otherwise use "."
+
+publish = "."
+
+This tells Netlify to look for functions in the 'netlify/functions' directory
+
+functions = "netlify/functions"
+
+Optional, but recommended to ensure node dependencies are installed for the function
+
+[functions]
+
+Specify the Node version for your function execution environment
+
+node_bundler = "esbuild"
