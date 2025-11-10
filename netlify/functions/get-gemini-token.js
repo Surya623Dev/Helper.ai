@@ -4,8 +4,10 @@
 
 // We will use standard Node.js fetch for robustness instead of relying on a specific SDK version.
 // The base endpoint for token generation (using the public Gemini API infrastructure).
+// NOTE: We keep the BASE_TOKEN_URL pointing to the /models collection.
 const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
+// The Live Model ID
 const LIVE_MODEL_ID = "gemini-2.5-flash-live-preview";
 const MAX_TOKEN_DURATION_SECONDS = 1800; // 30 minutes
 
@@ -30,7 +32,8 @@ export async function handler(event, context) {
     }
 
     try {
-        // 3. Construct the API URL and Payload
+        // 3. Construct the API URL
+        // The endpoint should be models/{model_id}:generateContentAsEphemeralToken
         const url = `${BASE_TOKEN_URL}/${LIVE_MODEL_ID}:generateContentAsEphemeralToken?key=${apiKey}`;
         
         const payload = {
@@ -43,18 +46,33 @@ export async function handler(event, context) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-
-        // 5. Handle response status
-        if (!response.ok) {
-            const errorBody = await response.json().catch(() => ({}));
-            throw new Error(`API Token Generation Failed: ${response.status} - ${JSON.stringify(errorBody)}`);
+        
+        let tokenResponse;
+        
+        // 5. Try to read the JSON body regardless of the status, for better error logging
+        try {
+            // Attempt to clone and read the response body as JSON
+            tokenResponse = await response.clone().json();
+        } catch (e) {
+            // If it fails to parse (e.g., status 404 returns HTML/text), use a fallback object
+            tokenResponse = { detail: `Could not parse JSON body. Status: ${response.status}` };
         }
 
-        const tokenResponse = await response.json();
+        // 6. Handle response status
+        if (!response.ok) {
+            // Log the full JSON response we attempted to read
+            console.error("API Error Response Body:", tokenResponse);
+            
+            // Extract the error message from the response if available, or fall back
+            const detailMessage = tokenResponse.error?.message || tokenResponse.detail || response.statusText;
+
+            throw new Error(`API Token Generation Failed: ${response.status} - ${detailMessage}`);
+        }
+
         const ephemeralToken = tokenResponse.token;
         const webSocketUrl = tokenResponse.url;
 
-        // 6. Return the token and URL securely
+        // 7. Return the token and URL securely
         return {
             statusCode: 200,
             headers: {
@@ -73,7 +91,7 @@ export async function handler(event, context) {
         };
     } catch (error) {
         // Logging the error structure to help with further debugging
-        console.error("Error generating ephemeral token:", error.message, "Full Error:", error); 
+        console.error("Error generating ephemeral token (Catch Block):", error.message); 
         return {
             statusCode: 500,
             body: JSON.stringify({ 
