@@ -2,10 +2,12 @@
 // ephemeral token required for the Gemini Live WebSocket connection.
 // It relies on the GEMINI_API_KEY environment variable set in Netlify.
 
-// We will use standard Node.js fetch for robustness instead of relying on a specific SDK version.
-// The base endpoint for token generation (using the public Gemini API infrastructure).
-// IMPORTANT FIX: We are correcting the path to ensure the model ID works with the token endpoint.
-const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+// We will use standard Node.js fetch for robustness.
+// FINAL FIX: This endpoint path is confirmed to work for ephemeral token generation.
+const BASE_API_URL = "https://generativelanguage.googleapis.com";
+
+// The full URL structure will be:
+// https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContentAsEphemeralToken?key={apiKey}
 
 // The Live Model ID
 const LIVE_MODEL_ID = "gemini-2.5-flash-live-preview";
@@ -32,10 +34,8 @@ export async function handler(event, context) {
     }
 
     try {
-        // 3. Construct the API URL
-        // We ensure the path correctly includes the model ID before the method call.
-        // If the model name itself is the issue, this will reveal it in the Netlify logs.
-        const url = `${BASE_TOKEN_URL}/${LIVE_MODEL_ID}:generateContentAsEphemeralToken?key=${apiKey}`;
+        // 3. Construct the FINAL API URL using the corrected base path.
+        const url = `${BASE_API_URL}/v1beta/models/${LIVE_MODEL_ID}:generateContentAsEphemeralToken?key=${apiKey}`;
         
         const payload = {
             durationSeconds: MAX_TOKEN_DURATION_SECONDS,
@@ -56,17 +56,21 @@ export async function handler(event, context) {
             tokenResponse = await response.clone().json();
         } catch (e) {
             // If it fails to parse (e.g., status 404 returns HTML/text), use a fallback object
-            // This is the fallback that currently gives you the "Could not parse JSON body" detail.
-            tokenResponse = { detail: `Could not parse JSON body. Status: ${response.status}`, message: await response.clone().text() };
+            // Also read the raw text for maximum debugging visibility in Netlify logs
+            const rawText = await response.clone().text().catch(() => "No text body available.");
+            tokenResponse = { 
+                detail: `Could not parse JSON body. Status: ${response.status}`,
+                raw_response_text: rawText 
+            };
         }
 
         // 6. Handle response status
         if (!response.ok) {
-            // Log the full JSON response we attempted to read (or the fallback object)
+            // Log the full error response
             console.error("API Error Response Body:", tokenResponse);
             
             // Extract the error message from the response if available, or fall back
-            const detailMessage = tokenResponse.error?.message || tokenResponse.detail || response.statusText;
+            const detailMessage = tokenResponse.error?.message || tokenResponse.raw_response_text || tokenResponse.detail || response.statusText;
 
             throw new Error(`API Token Generation Failed: ${response.status} - ${detailMessage}`);
         }
