@@ -2,8 +2,7 @@
 // Purpose: Generate ephemeral token for Gemini Live using the most reliable public v1beta endpoint structure.
 
 const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta";
-const TOKEN_GENERATION_MODEL_ID = "models/gemini-2.5-flash"; // Verified to exist on your account
-const TARGET_LIVE_MODEL_ID = "models/gemini-2.5-flash-live-preview";
+const TARGET_LIVE_MODEL_ID = "gemini-2.5-flash-live-preview";
 const MAX_TOKEN_DURATION_SECONDS = 1800; // 30 minutes
 
 export async function handler(event) {
@@ -31,19 +30,12 @@ export async function handler(event) {
     return { statusCode: 500, body: JSON.stringify({ error: "Server error: Missing GEMINI_API_KEY" }) };
   }
 
-  // Final, most accurate URL structure for this method
-  const url = `${BASE_TOKEN_URL}/${encodeURIComponent(TOKEN_GENERATION_MODEL_ID)}:generateContentAsEphemeralToken?key=${encodeURIComponent(apiKey)}`;
+  // Correct URL structure for Gemini Live API token generation
+  const url = `${BASE_TOKEN_URL}/models/${TARGET_LIVE_MODEL_ID}:generateToken?key=${encodeURIComponent(apiKey)}`;
 
-  // Payload includes liveConfig, which is critical for Live API access
+  // Simple payload for ephemeral token generation
   const payload = {
-    durationSeconds: MAX_TOKEN_DURATION_SECONDS,
-    liveConfig: {
-      model: TARGET_LIVE_MODEL_ID,
-      audio: {
-        encoding: "linear16",
-        sampleRateHertz: 16000
-      },
-    }
+    ttlSeconds: MAX_TOKEN_DURATION_SECONDS
   };
 
   try {
@@ -76,12 +68,14 @@ export async function handler(event) {
     }
 
     const ephemeralToken = tokenResponse.token ?? tokenResponse.name ?? tokenResponse.authToken ?? null;
-    const webSocketUrl = tokenResponse.url ?? tokenResponse.websocketUrl ?? null;
 
     if (!ephemeralToken) {
       console.error("Token not present in tokenResponse:", tokenResponse);
       return { statusCode: 500, body: JSON.stringify({ error: "Missing token in response", tokenResponse }) };
     }
+
+    // Construct the WebSocket URL for Gemini Live API
+    const websocketUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent`;
 
     return {
       statusCode: 200,
@@ -93,8 +87,7 @@ export async function handler(event) {
       },
       body: JSON.stringify({
         token: ephemeralToken,
-        websocketUrl,
-        modelId: TOKEN_GENERATION_MODEL_ID,
+        websocketUrl: websocketUrl,
         targetLiveModel: TARGET_LIVE_MODEL_ID,
         expiresInSeconds: MAX_TOKEN_DURATION_SECONDS,
         rawResponse: tokenResponse
