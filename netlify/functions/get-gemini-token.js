@@ -1,100 +1,61 @@
 // netlify/functions/get-gemini-token.js
-// Purpose: Generate ephemeral token for Gemini Live using the most reliable public v1beta endpoint structure.
+// Purpose: Securely provide the permanent API Key and System Instruction to the client.
+// This bypasses the blocked ':generateToken' endpoint.
 
-const BASE_TOKEN_URL = "https://generativelanguage.googleapis.com/v1beta";
 const TARGET_LIVE_MODEL_ID = "gemini-2.5-flash-live-preview";
-const MAX_TOKEN_DURATION_SECONDS = 1800; // 30 minutes
+
+// System instruction for interview co-pilot (moved to backend for secure management)
+const systemInstruction = `You are an AI Interview Co-Pilot assistant. Your role is to help candidates during technical interviews by providing structured, concise answers.
+
+CRITICAL RULES:
+1. Listen to the interviewer's question carefully
+2. Provide answers in EXACTLY this format:
+    • [Key Point 1]: Brief explanation (max 15 words)
+    • [Key Point 2]: Brief explanation (max 15 words)
+    • [Key Point 3]: Brief explanation (max 15 words)
+    
+3. ALWAYS use the STAR method when appropriate (Situation, Task, Action, Result). Structure the bullet points to align with STAR if the question is behavioral.
+4. Keep responses to 3-5 bullet points maximum.
+5. Focus on technical accuracy and clarity.
+6. Never provide full sentences or paragraphs - only structured bullets.`;
+
 
 export async function handler(event) {
-  // Allow GET/POST only
-  if (event.httpMethod !== "GET" && event.httpMethod !== "POST") {
+  // Allow GET/OPTIONS only (POST is not needed for a simple key fetch)
+  if (event.httpMethod !== "GET" && event.httpMethod !== "OPTIONS") {
     return { statusCode: 405, body: JSON.stringify({ error: "Method Not Allowed" }) };
   }
 
-  // Handle CORS pre-flight requests
-  if (event.httpMethod === 'OPTIONS') {
-    return {
-        statusCode: 200,
-        headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-        },
-        body: ''
-    };
-  }
-
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("Missing GEMINI_API_KEY env var");
-    return { statusCode: 500, body: JSON.stringify({ error: "Server error: Missing GEMINI_API_KEY" }) };
-  }
-
-  // Correct URL structure for Gemini Live API token generation
-  const url = `${BASE_TOKEN_URL}/models/${TARGET_LIVE_MODEL_ID}:generateToken?key=${encodeURIComponent(apiKey)}`;
-
-  // Simple payload for ephemeral token generation
-  const payload = {
-    ttlSeconds: MAX_TOKEN_DURATION_SECONDS
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type"
   };
 
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    const raw = await resp.text().catch(() => "");
-
-    if (!resp.ok) {
-      console.error("API Token Generation Failed:", resp.status, raw);
-      return {
-        statusCode: 500,
-        body: JSON.stringify({
-          error: "API Token Generation Failed",
-          status: resp.status,
-          raw_response_text: raw || null
-        })
-      };
-    }
-
-    let tokenResponse;
-    try {
-      tokenResponse = JSON.parse(raw || "{}");
-    } catch (e) {
-      console.error("Failed to parse JSON token response, raw:", raw);
-      return { statusCode: 500, body: JSON.stringify({ error: "Invalid JSON from token endpoint", raw }) };
-    }
-
-    const ephemeralToken = tokenResponse.token ?? tokenResponse.name ?? tokenResponse.authToken ?? null;
-
-    if (!ephemeralToken) {
-      console.error("Token not present in tokenResponse:", tokenResponse);
-      return { statusCode: 500, body: JSON.stringify({ error: "Missing token in response", tokenResponse }) };
-    }
-
-    // Construct the WebSocket URL for Gemini Live API
-    const websocketUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent`;
-
-    return {
-      statusCode: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
-      },
-      body: JSON.stringify({
-        token: ephemeralToken,
-        websocketUrl: websocketUrl,
-        targetLiveModel: TARGET_LIVE_MODEL_ID,
-        expiresInSeconds: MAX_TOKEN_DURATION_SECONDS,
-        rawResponse: tokenResponse
-      })
-    };
-  } catch (err) {
-    console.error("Unhandled error generating token:", err);
-    return { statusCode: 500, body: JSON.stringify({ error: "Failed to generate token", detail: String(err) }) };
+  // Handle CORS pre-flight requests
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers, body: '' };
   }
+
+  if (!apiKey) {
+    console.error("Missing GEMINI_API_KEY env var");
+    return { 
+      statusCode: 500, 
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ error: "Server error: Missing GEMINI_API_KEY" }) 
+    };
+  }
+
+  // Success: Return the necessary data to the client
+  return {
+    statusCode: 200,
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      apiKey: apiKey,
+      targetLiveModel: TARGET_LIVE_MODEL_ID,
+      systemInstruction: systemInstruction,
+      websocketUrl: `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent`,
+    })
+  };
 }
