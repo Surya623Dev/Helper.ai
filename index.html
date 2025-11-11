@@ -84,11 +84,16 @@
     let currentTranscription = '';
     let isGenerating = false;
 
+    /**
+     * Convert float32 PCM (-1..1) samples to signed 16-bit PCM Int16Array.
+     * If inputSampleRate != TARGET_SAMPLE_RATE, downsample using naive nearest approach.
+     */
     function convertAndDownsampleAudio(buffer, inputSampleRate) {
         if (inputSampleRate === TARGET_SAMPLE_RATE) {
             const pcm16 = new Int16Array(buffer.length);
             for (let i = 0; i < buffer.length; i++) {
-                pcm16[i] = Math.max(-1, Math.min(1, buffer[i])) * 0x7fff;
+                const s = Math.max(-1, Math.min(1, buffer[i]));
+                pcm16[i] = Math.round(s * 0x7fff);
             }
             return pcm16;
         }
@@ -100,10 +105,28 @@
         for (let i = 0; i < newLength; i++) {
             const index = Math.round(i * ratio);
             const value = buffer[index];
-            downsampled[i] = Math.max(-1, Math.min(1, value)) * 0x7fff;
+            const s = Math.max(-1, Math.min(1, value));
+            downsampled[i] = Math.round(s * 0x7fff);
         }
 
         return downsampled;
+    }
+
+    /**
+     * Convert an Int16Array to Base64 string safely using chunks.
+     */
+    function int16ToBase64(int16Array) {
+        // Use Uint8Array view of the Int16Array buffer
+        const uint8 = new Uint8Array(int16Array.buffer);
+        let binary = '';
+        const chunkSize = 0x8000; // 32KB chunks
+
+        for (let i = 0; i < uint8.length; i += chunkSize) {
+            const chunk = uint8.subarray(i, i + chunkSize);
+            // String.fromCharCode applied to each byte in chunk
+            binary += String.fromCharCode.apply(null, chunk);
+        }
+        return btoa(binary);
     }
 
     // --- Updated fetch: now returns apiKey + websocketUrl ---
@@ -164,9 +187,10 @@
 
         webSocket.onmessage = handleWebSocketMessage;
 
-        webSocket.onclose = () => {
+        webSocket.onclose = (ev) => {
             statusMessage.textContent = 'Disconnected. Click Start to restart.';
             micIcon.classList.remove('text-gemini-blue');
+            console.warn('WebSocket closed', ev);
             cleanUp();
         };
 
@@ -247,20 +271,29 @@
                     const rawBuffer = event.inputBuffer.getChannelData(0);
                     const pcm16Data = convertAndDownsampleAudio(rawBuffer, audioContext.sampleRate);
 
-                    // NOTE: depending on the server expectations you might need to base64-encode audio bytes.
-                    // The original code used pcm16Data.buffer directly; we kept that behavior here.
+                    // --- IMPORTANT FIX: send Base64-encoded audio bytes inside JSON payload ---
+                    const base64Audio = int16ToBase64(pcm16Data);
+
                     const audioPayload = {
                         bidiGenerateContentRealtimeInput: {
                             audio: {
-                                audioBytes: pcm16Data.buffer
+                                // text-safe Base64 payload; server should decode base64 -> bytes
+                                audioBytes: base64Audio,
+                                // optional hint; include if API expects it
+                                mimeType: `audio/pcm; rate=${TARGET_SAMPLE_RATE}; encoding=signed-integer; bits=16; endian=little`
                             }
                         }
                     };
 
-                    webSocket.send(JSON.stringify(audioPayload));
+                    try {
+                        webSocket.send(JSON.stringify(audioPayload));
+                    } catch (e) {
+                        console.error('Failed to send audio frame:', e);
+                    }
                 }
             };
 
+            // connect nodes - keep destination to avoid suspended context in some browsers.
             mediaStreamSource.connect(audioProcessor);
             audioProcessor.connect(audioContext.destination);
 
