@@ -68,15 +68,11 @@
 
   <script type="module">
     // === CONFIG ===
-    // Your Netlify function (or any server endpoint) that returns an ephemeral token + websocketUrl:
-    // Expected JSON: { apiKey: "xxx", websocketUrl: "wss://..." }
+    // Your Netlify function (or any server endpoint) that returns the key and config data:
     const NETLIFY_FUNCTION_URL = "https://cohelper.netlify.app/.netlify/functions/get-gemini-token";
 
     const TARGET_SAMPLE_RATE = 16000;
-
-    const SYSTEM_INSTRUCTION_PROMPT = `
-You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interview conversation and provide short, actionable suggestions for the interviewer. Focus on follow-up questions, clarification prompts, and probing questions to dig deeper into the candidate's skills, motivations, and problem-solving. Keep suggestions brief (1-3 bullets), professional, and helpful.
-`;
+    // NOTE: SYSTEM_INSTRUCTION_PROMPT is now retrieved from the backend function.
 
     // === DOM ===
     const statusMessage = document.getElementById('status-message');
@@ -92,7 +88,7 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
     let isStreaming = false;
     let webSocket = null;
     let audioContext = null;
-    let workletNode = null; // Changed from audioProcessor
+    let workletNode = null; 
     let mediaStream = null;
     let currentTranscription = '';
     let isGenerating = false;
@@ -116,6 +112,9 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
 
     // === Networking ===
 
+    /**
+     * Fetches API Key, WebSocket URL, Model ID, and System Instruction from the backend.
+     */
     async function fetchEphemeralToken() {
       statusMessage.textContent = 'Fetching API key...';
       try {
@@ -125,11 +124,11 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
           throw new Error(`Token fetch failed: ${errorBody}`);
         }
         const data = await response.json();
-        // Expecting { apiKey, websocketUrl }
-        if (!data || !data.apiKey || !data.websocketUrl) {
-          throw new Error('Invalid token response from server.');
+        // EXPECTING: { apiKey, websocketUrl, targetLiveModel, systemInstruction }
+        if (!data || !data.apiKey || !data.websocketUrl || !data.systemInstruction || !data.targetLiveModel) {
+            throw new Error('Invalid token response from server: Missing required fields (apiKey, websocketUrl, systemInstruction, or targetLiveModel).');
         }
-        return data;
+        return data; 
       } catch (err) {
         console.error('fetchEphemeralToken error', err);
         statusMessage.textContent = 'Failed to fetch API key. Check server.';
@@ -137,15 +136,19 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
       }
     }
 
-    function setupWebSocket(apiKey, websocketUrl) {
-      const wsUrl = `${websocketUrl}?api_key=${encodeURIComponent(apiKey)}`;
+    /**
+     * Sets up the WebSocket connection using the dynamic data fetched from the backend.
+     */
+    function setupWebSocket(data) {
+      // Use the API Key from the response to build the URL
+      const wsUrl = `${data.websocketUrl}?api_key=${encodeURIComponent(data.apiKey)}`;
       webSocket = new WebSocket(wsUrl);
 
       webSocket.onopen = () => {
         statusMessage.textContent = 'Connected. Sending configuration...';
         initialMessage.classList.add('hidden');
 
-        // First setup/config message for the realtime session
+        // First setup/config message for the realtime session, using dynamic data
         const setupPayload = {
           audio_config: {
             sample_rate: TARGET_SAMPLE_RATE,
@@ -153,8 +156,8 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
             language_code: "en-US",
           },
           llm_config: {
-            model_id: "gemini-2.5-flash-live-preview",
-            system_instruction: SYSTEM_INSTRUCTION_PROMPT,
+            model_id: data.targetLiveModel,
+            system_instruction: data.systemInstruction,
           }
         };
 
@@ -244,7 +247,7 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
       }
     }
 
-    // === Audio processing (Updated to use AudioWorklet) ===
+    // === Audio processing (Using AudioWorklet) ===
 
     async function startAudioProcessing() {
       try {
@@ -286,7 +289,7 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
 
         // 4. Connect the stream to the Worklet
         mediaSource.connect(workletNode);
-        // Connect to destination (required by some browsers to keep the node alive)
+        // Connect to destination (optional, but often used to keep the node alive)
         workletNode.connect(audioContext.destination); 
         
       } catch (err) {
@@ -303,7 +306,7 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
         mediaStream = null;
       }
       
-      if (workletNode) { // Check for the new variable
+      if (workletNode) { 
         try { workletNode.disconnect(); } catch(e) {}
         workletNode = null;
       }
@@ -339,13 +342,14 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
       }
 
       try {
-        const { apiKey, websocketUrl } = await fetchEphemeralToken();
+        // Fetch all necessary data from the backend
+        const data = await fetchEphemeralToken(); 
 
-        // Start audio capture first (so audioContext exists)
+        // Start audio capture
         await startAudioProcessing();
 
-        // Then open websocket and stream audio frames as they come
-        setupWebSocket(apiKey, websocketUrl);
+        // Then open websocket and pass the data object
+        setupWebSocket(data); 
 
         toggleMicBtn.textContent = 'Stop';
       } catch (err) {
