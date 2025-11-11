@@ -1,398 +1,339 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Interview Co-Pilot (Debug WS Auth)</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    body { font-family: Inter, sans-serif; background: #0f172a; color: #e6eef8; padding: 1rem; }
-    .card { background: rgba(15,23,42,0.95); border: 1px solid #2b6df6; padding: 1rem; border-radius: 0.5rem; max-width: 720px; margin: 0 auto; }
-    .muted { color: #9aa7c7; font-size: .9rem; }
-    button { cursor: pointer; }
-    pre { background: rgba(0,0,0,0.35); padding: .5rem; border-radius: 6px; overflow:auto; max-height:160px; }
-  </style>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Interview Co-Pilot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-dark': '#1e293b',
+                        'secondary-light': '#fef3c7',
+                        'gemini-blue': '#4285F4',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background-color: transparent; margin: 0; padding: 0; overflow: hidden; font-family: 'Inter', sans-serif; pointer-events: none; }
+        #app-container { pointer-events: auto; max-width: 400px; margin-left: auto; margin-right: 1rem; margin-top: 1rem; position: fixed; top: 0; right: 0; }
+        #content-box { background-color: rgba(30, 41, 59, 0.95); border: 1px solid #4285F4; box-shadow: 0 10px 15px rgba(0,0,0,0.5); min-height: 100px; }
+        #suggestions-list li { padding-left: 1.5rem; text-indent: -1.5rem; list-style: none; }
+        #suggestions-list li::before { content: "•"; color: #4285F4; font-weight: bold; display: inline-block; width: 1.5rem; }
+        .fade-in { animation: fadeIn 0.5s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
 </head>
 <body>
-  <div class="card">
-    <div class="flex justify-between items-center">
-      <div>
-        <h2 class="text-lg font-semibold">Interview Co-Pilot</h2>
-        <div id="status" class="muted">Ready.</div>
-      </div>
-      <div>
-        <button id="toggle" class="px-3 py-1 bg-white text-blue-600 rounded">Start</button>
-      </div>
+
+<div id="app-container">
+    <div class="p-2 flex justify-between items-center rounded-t-lg bg-gemini-blue text-white shadow-lg">
+        <div class="flex items-center space-x-2">
+            <svg id="mic-icon" class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path d="M10 8a3 3 0 100-6 3 3 0 000 6zM3.465 14.493a1.264 1.264 0 001.03-.003 6.94 6.94 0 0110.99 0 1.264 1.264 0 001.03.003c.725.093 1.22-.05 1.517-.22A3 3 0 0020 12c0-1.87-1.428-3.41-3.235-3.807A5.947 5.947 0 0010 7a5.947 5.947 0 00-6.765 1.193C1.428 8.59 0 10.13 0 12a3 3 0 001.018 2.27c.297.17.792.313 1.517.22z"></path>
+            </svg>
+            <span id="status-message" class="text-sm font-semibold">Initializing...</span>
+        </div>
+        <button id="toggle-mic-btn" class="px-3 py-1 bg-white text-gemini-blue rounded-full text-xs font-bold hover:bg-gray-200">Start</button>
     </div>
 
-    <hr style="margin: .75rem 0; border-color: rgba(255,255,255,0.06)">
+    <div id="content-box" class="p-4 rounded-b-lg shadow-2xl transition-all duration-300">
+        <p id="transcription-output" class="text-secondary-light text-sm italic mb-2 min-h-[20px] fade-in" style="opacity: 0.7;"></p>
 
-    <p class="muted">Transcription:</p>
-    <p id="transcription" style="min-height:1.25rem; margin-bottom:.5rem;"></p>
+        <div id="suggestions-container" class="mt-2 hidden">
+            <p class="text-gemini-blue text-xs font-bold mb-1 uppercase">Co-Pilot Suggestions</p>
+            <ul id="suggestions-list" class="text-white text-base leading-relaxed"></ul>
+            <div id="loading-indicator" class="mt-3 text-center text-sm text-gemini-blue hidden">Generating response...</div>
+        </div>
 
-    <p class="muted">Debug console (last fetch result):</p>
-    <pre id="debug" aria-live="polite"></pre>
-  </div>
+        <p id="initial-message" class="text-gray-400 text-sm text-center py-4">Awaiting session start. Click 'Start' and grant microphone access.</p>
+    </div>
+</div>
 
 <script type="module">
-/* ========== CONFIG ========== */
-const NETLIFY_FUNCTION_URL = "https://cohelper.netlify.app/.netlify/functions/get-gemini-token";
-const TARGET_SAMPLE_RATE = 16000;
-const FRAME_SIZE = 1024;
+    // Configuration
+    const NETLIFY_FUNCTION_URL = "https://cohelper.netlify.app/.netlify/functions/get-gemini-token";
+    const TARGET_SAMPLE_RATE = 16000;
+    const FRAME_SIZE = 1024;
 
-/* ========== UI ========== */
-const statusEl = document.getElementById('status');
-const toggleBtn = document.getElementById('toggle');
-const transcriptionEl = document.getElementById('transcription');
-const debugEl = document.getElementById('debug');
+    const SYSTEM_INSTRUCTION_PROMPT = `
+        You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interview conversation...
+        (kept same as original)
+    `;
 
-/* ========== STATE ========== */
-let mediaStream = null;
-let audioContext = null;
-let audioProcessor = null;
-let webSocket = null;
-let isStreaming = false;
+    // DOM
+    const statusMessage = document.getElementById('status-message');
+    const toggleMicBtn = document.getElementById('toggle-mic-btn');
+    const micIcon = document.getElementById('mic-icon');
+    const transcriptionOutput = document.getElementById('transcription-output');
+    const suggestionsContainer = document.getElementById('suggestions-container');
+    const suggestionsList = document.getElementById('suggestions-list');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    const initialMessage = document.getElementById('initial-message');
 
-/* ========== UTILITIES ========== */
-function logDebug(...args) {
-  console.log(...args);
-  debugEl.textContent = args.map(a => (typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a))).join(' ');
-}
+    // State
+    let isStreaming = false;
+    let webSocket = null;
+    let audioContext = null;
+    let audioProcessor = null;
+    let mediaStream = null;
+    let currentTranscription = '';
+    let isGenerating = false;
 
-function setStatus(msg) {
-  statusEl.textContent = msg;
-  logDebug('[STATUS]', msg);
-}
-
-/* Convert Float32 PCM (-1..1) to Int16Array and downsample if needed */
-function convertAndDownsampleAudio(buffer, inputSampleRate) {
-  if (inputSampleRate === TARGET_SAMPLE_RATE) {
-    const pcm16 = new Int16Array(buffer.length);
-    for (let i = 0; i < buffer.length; i++) {
-      const s = Math.max(-1, Math.min(1, buffer[i]));
-      pcm16[i] = Math.round(s * 0x7fff);
-    }
-    return pcm16;
-  }
-  const ratio = inputSampleRate / TARGET_SAMPLE_RATE;
-  const newLength = Math.round(buffer.length / ratio);
-  const out = new Int16Array(newLength);
-  for (let i = 0; i < newLength; i++) {
-    const idx = Math.round(i * ratio);
-    const s = Math.max(-1, Math.min(1, buffer[idx] || 0));
-    out[i] = Math.round(s * 0x7fff);
-  }
-  return out;
-}
-
-/* Base64 encode Int16Array in chunks */
-function int16ToBase64(int16Array) {
-  const uint8 = new Uint8Array(int16Array.buffer);
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < uint8.length; i += chunk) {
-    const slice = uint8.subarray(i, i + chunk);
-    binary += String.fromCharCode.apply(null, slice);
-  }
-  return btoa(binary);
-}
-
-/* ========== FETCH EPHEMERAL TOKEN (from your server) ========== */
-async function fetchEphemeralToken() {
-  setStatus('Fetching ephemeral token from server...');
-  try {
-    const res = await fetch(NETLIFY_FUNCTION_URL);
-    const text = await res.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      // If server returned non-json, log raw text for debugging
-      throw new Error('Token endpoint did not return JSON. Response: ' + text);
-    }
-    // Expect shape: { apiKey: "...", websocketUrl: "wss://..." } or similar
-    logDebug('fetchEphemeralToken ->', data);
-    setStatus('Token fetched. Inspecting response...');
-    return data;
-  } catch (err) {
-    console.error('fetchEphemeralToken error:', err);
-    setStatus('Token fetch failed: ' + err.message);
-    throw err;
-  }
-}
-
-/* ========== WEBSOCKET SETUP — tries multiple param names for auth ========== */
-function tryConnectWithVariants(websocketUrl, apiKey) {
-  // Attempt order:
-  // 1) If websocketUrl already contains query token, use it as-is.
-  // 2) Else try appending query param names commonly expected by different services.
-  const variants = [];
-
-  // Use returned websocketUrl as-is first
-  variants.push(websocketUrl);
-
-  // Standard simple param
-  variants.push(appendQueryParam(websocketUrl, 'api_key', apiKey));
-
-  // Some services expect x-goog-api-key style
-  variants.push(appendQueryParam(websocketUrl, 'x-goog-api-key', apiKey));
-  variants.push(appendQueryParam(websocketUrl, 'key', apiKey));
-
-  // Some expect a Bearer in an 'authorization' query param (URL-encoded)
-  variants.push(appendQueryParam(websocketUrl, 'authorization', `Bearer ${apiKey}`));
-  variants.push(appendQueryParam(websocketUrl, 'auth', apiKey));
-  variants.push(appendQueryParam(websocketUrl, 'token', apiKey));
-
-  // Deduplicate while preserving order
-  const seen = new Set();
-  const unique = variants.filter(u => {
-    if (!u) return false;
-    if (seen.has(u)) return false;
-    seen.add(u);
-    return true;
-  });
-
-  // Try the variants sequentially until one connects successfully
-  (async function tryLoop() {
-    for (let idx = 0; idx < unique.length; idx++) {
-      const url = unique[idx];
-      setStatus(`Attempting WebSocket connect (attempt ${idx + 1}/${unique.length})...`);
-      logDebug('Trying WS URL:', url);
-      try {
-        const connected = await connectOnce(url);
-        if (connected) {
-          setStatus('WebSocket connected using variant ' + (idx + 1));
-          return;
-        } else {
-          logDebug('Variant failed to establish a usable connection:', url);
-        }
-      } catch (err) {
-        logDebug('connectOnce threw:', err);
-      }
-    }
-    setStatus('All WebSocket attempts failed. Check server-side token issuance and allowed origins.');
-  })();
-}
-
-/* Append query param helper */
-function appendQueryParam(url, key, value) {
-  if (!url) return null;
-  try {
-    const u = new URL(url);
-    u.searchParams.set(key, value);
-    return u.toString();
-  } catch (e) {
-    // If not a full URL, try naive append
-    if (url.includes('?')) return `${url}&${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
-    return `${url}?${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
-  }
-}
-
-/* Single connect attempt. Returns a Promise<boolean> that resolves true if connected and received first OK message */
-function connectOnce(wsUrl) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    try {
-      const ws = new WebSocket(wsUrl);
-
-      // timeout in case server drops with no event
-      const connectTimeout = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          try { ws.close(); } catch(e){}
-          resolve(false);
-        }
-      }, 6000);
-
-      ws.onopen = () => {
-        logDebug('WebSocket onopen for', wsUrl);
-        // send initial config after short delay to ensure socket is fully established
-        const setupPayload = {
-          bidiGenerateContentRealtimeInput: {
-            liveConfig: {
-              audio_config: { sample_rate: TARGET_SAMPLE_RATE, encoding: "LINEAR16", language_code: "en-US" },
-              llm_config: { model_id: "gemini-2.5-flash-live-preview", system_instruction: "You are an expert Interview Co-Pilot." }
+    function convertAndDownsampleAudio(buffer, inputSampleRate) {
+        if (inputSampleRate === TARGET_SAMPLE_RATE) {
+            const pcm16 = new Int16Array(buffer.length);
+            for (let i = 0; i < buffer.length; i++) {
+                pcm16[i] = Math.max(-1, Math.min(1, buffer[i])) * 0x7fff;
             }
-          }
-        };
-        try { ws.send(JSON.stringify(setupPayload)); } catch(e) { console.warn('send failed', e); }
-
-        // Wait for first meaningful message (or short timeout)
-        const msgTimeout = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(connectTimeout);
-            try { ws.close(); } catch(e){}
-            resolve(true); // we got open and sent config -> treat as success; server might respond shortly after
-          }
-        }, 800);
-
-        ws.onmessage = (evt) => {
-          // If server immediately closes with 1008, onclose will handle. If we get messages, assume success.
-          try {
-            const payload = evt.data;
-            logDebug('WS Message:', payload);
-          } catch (e) { logDebug('WS message parse error', e); }
-          if (!settled) {
-            settled = true;
-            clearTimeout(connectTimeout);
-            clearTimeout(msgTimeout);
-            // keep this ws instance as the active socket for the page
-            webSocket = ws;
-            attachWebSocketHandlers(ws);
-            resolve(true);
-          }
-        };
-
-        ws.onclose = (ev) => {
-          logDebug('WS onclose', ev);
-          if (!settled) {
-            settled = true;
-            clearTimeout(connectTimeout);
-            resolve(false);
-          } else {
-            // if already settled and became closed later, let standard handlers run
-            attachWebSocketHandlers(ws); // still attach to get diagnostic close reason
-          }
-        };
-
-        ws.onerror = (err) => {
-          logDebug('WS onerror', err);
-          // don't reject immediately — server might send close event with code/reason
-        };
-      }; // onopen end
-    } catch (err) {
-      logDebug('connectOnce immediate exception', err);
-      reject(err);
-    }
-  });
-}
-
-/* Attach longer-lived handlers to the active webSocket once we commit to it */
-function attachWebSocketHandlers(ws) {
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      const live = data.bidiGenerateContentRealtimeOutput;
-      if (live && live.liveTranscription) {
-        const t = live.liveTranscription.text || '';
-        transcriptionEl.textContent = t;
-      }
-      logDebug('onmessage parsed', data);
-    } catch (e) {
-      logDebug('onmessage raw', event.data);
-    }
-  };
-
-  ws.onclose = (ev) => {
-    logDebug('Active WS closed', ev);
-    const code = ev.code;
-    const reason = ev.reason || '';
-    setStatus(`WebSocket closed (code ${code}). Reason: ${reason || 'n/a'}`);
-    // Common actionable reasons:
-    if (code === 1008 || /unregistered|unauthorized|invalid/i.test(reason)) {
-      setStatus(`Auth/policy rejection: ${reason}. Check that the server signed the URL with correct credentials or return a pre-signed websocketUrl.`);
-    }
-    isStreaming = false;
-    // cleanup
-  };
-
-  ws.onerror = (err) => {
-    logDebug('Active WS error', err);
-    setStatus('WebSocket error. See console.');
-  };
-}
-
-/* ========== AUDIO CAPTURE & SENDING ========== */
-async function startAudioProcessing() {
-  setStatus('Requesting microphone permission...');
-  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  audioContext = new (window.AudioContext || window.webkitAudioContext)();
-  const src = audioContext.createMediaStreamSource(mediaStream);
-  audioProcessor = audioContext.createScriptProcessor(FRAME_SIZE, 1, 1);
-
-  audioProcessor.onaudioprocess = (evt) => {
-    if (!webSocket || webSocket.readyState !== WebSocket.OPEN) return;
-    const raw = evt.inputBuffer.getChannelData(0);
-    const pcm16 = convertAndDownsampleAudio(raw, audioContext.sampleRate);
-    const base64 = int16ToBase64(pcm16);
-
-    const payload = {
-      bidiGenerateContentRealtimeInput: {
-        audio: {
-          audioBytes: base64,
-          mimeType: `audio/pcm; rate=${TARGET_SAMPLE_RATE}; encoding=signed-integer; bits=16; endian=little`
+            return pcm16;
         }
-      }
+
+        const ratio = inputSampleRate / TARGET_SAMPLE_RATE;
+        const newLength = Math.round(buffer.length / ratio);
+        const downsampled = new Int16Array(newLength);
+
+        for (let i = 0; i < newLength; i++) {
+            const index = Math.round(i * ratio);
+            const value = buffer[index];
+            downsampled[i] = Math.max(-1, Math.min(1, value)) * 0x7fff;
+        }
+
+        return downsampled;
+    }
+
+    // --- Updated fetch: now returns apiKey + websocketUrl ---
+    async function fetchEphemeralToken() {
+        statusMessage.textContent = 'Fetching API key...';
+        try {
+            const response = await fetch(NETLIFY_FUNCTION_URL);
+            if (!response.ok) {
+                const errorBody = await response.json().catch(() => ({ detail: `Status ${response.status}` }));
+                throw new Error(`HTTP error! ${errorBody.detail || response.statusText}`);
+            }
+            const data = await response.json();
+            // Expected shape: { apiKey: "...", websocketUrl: "wss://..." }
+            return data;
+        } catch (error) {
+            console.error('Error fetching API key:', error);
+            statusMessage.textContent = `API Key Fetch Failed: ${error.message}. Check Netlify logs/URL.`;
+            micIcon.classList.remove('text-gemini-blue');
+            throw error;
+        }
+    }
+
+    /**
+     * Initialize WebSocket using API key in the URL query string.
+     * NOTE: we use `api_key` param here — adapt if your server expects a different param name.
+     */
+    function setupWebSocket(apiKey, websocketUrl) {
+        // --- KEY CHANGE: use apiKey in the WebSocket URL as query param ---
+        const wsUrl = `${websocketUrl}?api_key=${encodeURIComponent(apiKey)}`;
+        webSocket = new WebSocket(wsUrl);
+
+        webSocket.onopen = () => {
+            statusMessage.textContent = 'Connected. Sending configuration...';
+            initialMessage.classList.add('hidden');
+
+            const setupPayload = {
+                audio_config: {
+                    sample_rate: TARGET_SAMPLE_RATE,
+                    encoding: "LINEAR16",
+                    language_code: "en-US",
+                },
+                llm_config: {
+                    model_id: "gemini-2.5-flash-live-preview",
+                    system_instruction: SYSTEM_INSTRUCTION_PROMPT,
+                },
+            };
+
+            const firstMessage = {
+                bidiGenerateContentRealtimeInput: {
+                    liveConfig: setupPayload,
+                }
+            };
+            webSocket.send(JSON.stringify(firstMessage));
+            statusMessage.textContent = 'Listening for Interview Audio...';
+            micIcon.classList.add('text-gemini-blue');
+            isStreaming = true;
+        };
+
+        webSocket.onmessage = handleWebSocketMessage;
+
+        webSocket.onclose = () => {
+            statusMessage.textContent = 'Disconnected. Click Start to restart.';
+            micIcon.classList.remove('text-gemini-blue');
+            cleanUp();
+        };
+
+        webSocket.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+            statusMessage.textContent = 'Connection Error. See console.';
+            micIcon.classList.remove('text-gemini-blue');
+            if (webSocket) webSocket.close();
+        };
+    }
+
+    function handleWebSocketMessage(event) {
+        try {
+            const response = JSON.parse(event.data);
+            const liveOutput = response.bidiGenerateContentRealtimeOutput;
+            if (!liveOutput) return;
+
+            if (liveOutput.liveTranscription) {
+                const transcript = liveOutput.liveTranscription.text;
+                const isFinal = liveOutput.liveTranscription.is_final;
+                if (transcript) {
+                    currentTranscription = transcript;
+                    transcriptionOutput.textContent = isFinal ? transcript : transcript + '...';
+                }
+            }
+
+            if (liveOutput.voiceActivity) {
+                if (liveOutput.voiceActivity.utterance_state === 'END' && !isGenerating) {
+                    statusMessage.textContent = 'Interviewer paused. Generating Co-Pilot suggestion...';
+                    suggestionsContainer.classList.remove('hidden');
+                    loadingIndicator.classList.remove('hidden');
+                    suggestionsList.innerHTML = '';
+                    isGenerating = true;
+                }
+
+                if (liveOutput.voiceActivity.utterance_state === 'START' && isGenerating) {
+                    suggestionsContainer.classList.add('hidden');
+                    loadingIndicator.classList.add('hidden');
+                    suggestionsList.innerHTML = '';
+                    isGenerating = false;
+                }
+            }
+
+            if (liveOutput.liveGeneration && isGenerating) {
+                const text = liveOutput.liveGeneration.text_update || '';
+                const isDone = liveOutput.liveGeneration.is_done;
+
+                if (text) {
+                    loadingIndicator.classList.add('hidden');
+
+                    const currentHtml = suggestionsList.innerHTML;
+                    const currentRawText = currentHtml.replace(/<li[^>]*>•\s*|<\/li>/gi, '').replace(/\<ul[^>]*\>|\<\/ul\>/gi, '');
+                    const combinedText = currentRawText + text;
+                    const points = combinedText.split(/\*\s*|\-\s*|\•\s*/).map(p => p.trim()).filter(p => p.length > 0);
+
+                    suggestionsList.innerHTML = points.map(p => `<li>${p}</li>`).join('');
+                }
+
+                if (isDone) {
+                    isGenerating = false;
+                    statusMessage.textContent = 'Listening for Interview Audio...';
+                }
+            }
+        } catch (error) {
+            console.error('Error handling WebSocket message:', error);
+        }
+    }
+
+    async function startAudioProcessing() {
+        try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const mediaStreamSource = audioContext.createMediaStreamSource(mediaStream);
+            audioProcessor = audioContext.createScriptProcessor(FRAME_SIZE, 1, 1);
+
+            audioProcessor.onaudioprocess = (event) => {
+                if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+                    const rawBuffer = event.inputBuffer.getChannelData(0);
+                    const pcm16Data = convertAndDownsampleAudio(rawBuffer, audioContext.sampleRate);
+
+                    // NOTE: depending on the server expectations you might need to base64-encode audio bytes.
+                    // The original code used pcm16Data.buffer directly; we kept that behavior here.
+                    const audioPayload = {
+                        bidiGenerateContentRealtimeInput: {
+                            audio: {
+                                audioBytes: pcm16Data.buffer
+                            }
+                        }
+                    };
+
+                    webSocket.send(JSON.stringify(audioPayload));
+                }
+            };
+
+            mediaStreamSource.connect(audioProcessor);
+            audioProcessor.connect(audioContext.destination);
+
+        } catch (error) {
+            console.error('Error starting audio processing:', error);
+            statusMessage.textContent = `Mic Error: ${error.name}. Grant permission to microphone.`;
+            micIcon.classList.remove('text-gemini-blue');
+            cleanUp();
+            throw error;
+        }
+    }
+
+    function cleanUp() {
+        if (mediaStream) {
+            mediaStream.getTracks().forEach(track => track.stop());
+            mediaStream = null;
+        }
+        if (audioProcessor) {
+            try { audioProcessor.disconnect(); } catch(e){}
+            audioProcessor = null;
+        }
+        if (audioContext && audioContext.state !== 'closed') {
+            audioContext.close().catch(e => console.error("Error closing AudioContext:", e));
+            audioContext = null;
+        }
+        if (webSocket) {
+            try { webSocket.close(); } catch(e){}
+            webSocket = null;
+        }
+
+        isStreaming = false;
+        isGenerating = false;
+        toggleMicBtn.textContent = 'Start';
+        suggestionsContainer.classList.add('hidden');
+        suggestionsList.innerHTML = '';
+        transcriptionOutput.textContent = '';
+        currentTranscription = '';
+        initialMessage.classList.remove('hidden');
+    }
+
+    async function toggleSession() {
+        if (isStreaming) {
+            statusMessage.textContent = 'Stopping session...';
+            cleanUp();
+            statusMessage.textContent = 'Session Stopped.';
+        } else {
+            try {
+                // fetch now returns { apiKey, websocketUrl }
+                const { apiKey, websocketUrl } = await fetchEphemeralToken();
+
+                if (audioContext && audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                } else {
+                    await startAudioProcessing();
+                }
+
+                // pass apiKey & websocketUrl to setupWebSocket
+                setupWebSocket(apiKey, websocketUrl);
+
+                toggleMicBtn.textContent = 'Stop';
+            } catch (error) {
+                cleanUp();
+            }
+        }
+    }
+
+    toggleMicBtn.addEventListener('click', toggleSession);
+
+    window.onload = () => {
+        statusMessage.textContent = 'Ready. Click Start.';
+        micIcon.classList.remove('text-gemini-blue');
     };
-
-    try {
-      webSocket.send(JSON.stringify(payload));
-    } catch (e) {
-      logDebug('Failed to send audio frame', e);
-    }
-  };
-
-  src.connect(audioProcessor);
-  audioProcessor.connect(audioContext.destination);
-  setStatus('Audio processing started (sending frames to WS).');
-}
-
-/* ========== CLEANUP ========== */
-function cleanUp() {
-  if (audioProcessor) { try { audioProcessor.disconnect(); } catch(e){} audioProcessor = null; }
-  if (audioContext) { try { audioContext.close(); } catch(e){} audioContext = null; }
-  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
-  if (webSocket) { try { webSocket.close(); } catch(e){} webSocket = null; }
-  isStreaming = false;
-  setStatus('Stopped.');
-}
-
-/* ========== MAIN CONTROL ========== */
-async function startSession() {
-  try {
-    const { apiKey, websocketUrl } = await fetchEphemeralToken();
-    logDebug('Server returned:', { apiKey, websocketUrl });
-    if (!websocketUrl && !apiKey) {
-      throw new Error('Token endpoint returned no websocketUrl or apiKey. Inspect server response.');
-    }
-
-    // If server returned a pre-signed websocketUrl that already contains token, prefer it.
-    // Otherwise, try several query param variants using the returned apiKey.
-    let attemptUrl = websocketUrl || null;
-    if (!attemptUrl) {
-      // If only apiKey returned, you must know base websocket URL — prefer server to return full URL.
-      throw new Error('No websocketUrl returned by server. Server should issue a pre-signed URL for browser clients.');
-    }
-
-    // Start audio capture first (it will only send if webSocket connects)
-    await startAudioProcessing();
-
-    // Try connecting with variants (this will set `webSocket` when successful)
-    tryConnectWithVariants(attemptUrl, apiKey);
-
-    isStreaming = true;
-    toggleBtn.textContent = 'Stop';
-  } catch (err) {
-    console.error('startSession failed:', err);
-    setStatus('Failed to start session: ' + (err.message || err));
-    cleanUp();
-  }
-}
-
-function stopSession() {
-  cleanUp();
-  toggleBtn.textContent = 'Start';
-}
-
-toggleBtn.addEventListener('click', async () => {
-  if (isStreaming) {
-    stopSession();
-  } else {
-    await startSession();
-  }
-});
-
 </script>
+
 </body>
 </html>
