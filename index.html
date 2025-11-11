@@ -106,6 +106,22 @@
         return downsampled;
     }
 
+    /**
+     * Convert an ArrayBuffer (or TypedArray.buffer) to Base64 safely by chunking.
+     * Returns a base64 string suitable for embedding in JSON.
+     */
+    function bufferToBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        const chunkSize = 0x8000; // 32KB chunks - avoids apply() limits
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+            const chunk = bytes.subarray(i, i + chunkSize);
+            // convert chunk to string
+            binary += String.fromCharCode.apply(null, chunk);
+        }
+        return btoa(binary);
+    }
+
     // --- Updated fetch: now returns apiKey + websocketUrl ---
     async function fetchEphemeralToken() {
         statusMessage.textContent = 'Fetching API key...';
@@ -247,12 +263,17 @@
                     const rawBuffer = event.inputBuffer.getChannelData(0);
                     const pcm16Data = convertAndDownsampleAudio(rawBuffer, audioContext.sampleRate);
 
-                    // NOTE: depending on the server expectations you might need to base64-encode audio bytes.
-                    // The original code used pcm16Data.buffer directly; we kept that behavior here.
+                    // only send if we have samples
+                    if (!pcm16Data || pcm16Data.length === 0) return;
+
+                    // IMPORTANT: Gemini Live expects base64-encoded audio inside JSON.
+                    const base64Audio = bufferToBase64(pcm16Data.buffer);
+
                     const audioPayload = {
                         bidiGenerateContentRealtimeInput: {
                             audio: {
-                                audioBytes: pcm16Data.buffer
+                                // audioBytes must be a base64 string (not raw ArrayBuffer)
+                                audioBytes: base64Audio
                             }
                         }
                     };
