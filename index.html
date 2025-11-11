@@ -62,7 +62,7 @@
 
     <footer style="margin-top:14px; display:flex; justify-content:space-between; align-items:center;">
       <div class="small">Audio encoding: LINEAR16 • Target sample rate: 16 kHz</div>
-      <div class="small">ScriptProcessorNode is used (works fine). Consider AudioWorklet later.</div>
+      <div class="small">AudioWorklet is now used for stable processing.</div>
     </footer>
   </div>
 
@@ -73,7 +73,6 @@
     const NETLIFY_FUNCTION_URL = "https://cohelper.netlify.app/.netlify/functions/get-gemini-token";
 
     const TARGET_SAMPLE_RATE = 16000;
-    const FRAME_SIZE = 1024; // matches ScriptProcessor frame size
 
     const SYSTEM_INSTRUCTION_PROMPT = `
 You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interview conversation and provide short, actionable suggestions for the interviewer. Focus on follow-up questions, clarification prompts, and probing questions to dig deeper into the candidate's skills, motivations, and problem-solving. Keep suggestions brief (1-3 bullets), professional, and helpful.
@@ -93,36 +92,12 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
     let isStreaming = false;
     let webSocket = null;
     let audioContext = null;
-    let audioProcessor = null;
+    let workletNode = null; // Changed from audioProcessor
     let mediaStream = null;
     let currentTranscription = '';
     let isGenerating = false;
 
     // === Helpers ===
-
-    function convertAndDownsampleAudio(buffer, inputSampleRate) {
-      // buffer: Float32Array of -1..1
-      if (inputSampleRate === TARGET_SAMPLE_RATE) {
-        const pcm16 = new Int16Array(buffer.length);
-        for (let i = 0; i < buffer.length; i++) {
-          const s = Math.max(-1, Math.min(1, buffer[i]));
-          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        return pcm16;
-      }
-
-      const ratio = inputSampleRate / TARGET_SAMPLE_RATE;
-      const newLength = Math.round(buffer.length / ratio);
-      const downsampled = new Int16Array(newLength);
-
-      for (let i = 0; i < newLength; i++) {
-        const idx = Math.round(i * ratio);
-        const s = buffer[idx] || 0;
-        const clamped = Math.max(-1, Math.min(1, s));
-        downsampled[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
-      }
-      return downsampled;
-    }
 
     /**
      * Convert an ArrayBuffer to base64 safely by chunking to avoid apply() limits.
@@ -269,44 +244,51 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
       }
     }
 
-    // === Audio processing ===
+    // === Audio processing (Updated to use AudioWorklet) ===
 
     async function startAudioProcessing() {
       try {
         mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        
+        // 1. Load the Worklet file
+        await audioContext.audioWorklet.addModule('pcm-processor.js');
+
+        // 2. Create the Worklet Node
+        workletNode = new AudioWorkletNode(audioContext, 'pcm-processor');
+
         const mediaSource = audioContext.createMediaStreamSource(mediaStream);
-        audioProcessor = audioContext.createScriptProcessor(FRAME_SIZE, 1, 1);
+        
+        // 3. Handle messages from the Worklet thread (containing the PCM data)
+        workletNode.port.onmessage = (event) => {
+            if (!webSocket || webSocket.readyState !== WebSocket.OPEN) return;
+            
+            const pcm16DataBuffer = event.data;
+            if (!pcm16DataBuffer || pcm16DataBuffer.byteLength === 0) return;
 
-        audioProcessor.onaudioprocess = (event) => {
-          if (!webSocket || webSocket.readyState !== WebSocket.OPEN) return;
+            // IMPORTANT: embed base64-encoded audio in JSON
+            const base64Audio = bufferToBase64(pcm16DataBuffer); 
 
-          const floatSamples = event.inputBuffer.getChannelData(0);
-          const pcm16Data = convertAndDownsampleAudio(floatSamples, audioContext.sampleRate);
+            const audioPayload = {
+                bidiGenerateContentRealtimeInput: {
+                    audio: {
+                        audioBytes: base64Audio
+                    }
+                }
+            };
 
-          if (!pcm16Data || pcm16Data.length === 0) return;
-
-          // IMPORTANT: embed base64-encoded audio in JSON
-          const base64Audio = bufferToBase64(pcm16Data.buffer);
-
-          const audioPayload = {
-            bidiGenerateContentRealtimeInput: {
-              audio: {
-                audioBytes: base64Audio
-              }
+            try {
+                webSocket.send(JSON.stringify(audioPayload));
+            } catch (err) {
+                console.error('Failed to send audio payload', err);
             }
-          };
-
-          try {
-            webSocket.send(JSON.stringify(audioPayload));
-          } catch (err) {
-            console.error('Failed to send audio payload', err);
-          }
         };
 
-        mediaSource.connect(audioProcessor);
-        // Connect to destination to keep the ScriptProcessor alive (no audio output intended)
-        audioProcessor.connect(audioContext.destination);
+        // 4. Connect the stream to the Worklet
+        mediaSource.connect(workletNode);
+        // Connect to destination (required by some browsers to keep the node alive)
+        workletNode.connect(audioContext.destination); 
+        
       } catch (err) {
         console.error('startAudioProcessing error', err);
         statusMessage.textContent = 'Microphone error. Grant permission or check device.';
@@ -314,15 +296,18 @@ You are an expert Interview Co-Pilot. Your task is to analyze the ongoing interv
       }
     }
 
+
     function cleanUp() {
       if (mediaStream) {
         mediaStream.getTracks().forEach(t => t.stop());
         mediaStream = null;
       }
-      if (audioProcessor) {
-        try { audioProcessor.disconnect(); } catch(e) {}
-        audioProcessor = null;
+      
+      if (workletNode) { // Check for the new variable
+        try { workletNode.disconnect(); } catch(e) {}
+        workletNode = null;
       }
+      
       if (audioContext) {
         audioContext.close().catch(() => {});
         audioContext = null;
