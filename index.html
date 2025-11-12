@@ -141,7 +141,7 @@
      */
     function setupWebSocket(data) {
       // Use the API Key from the response to build the URL
-      const wsUrl = `${data.websocketUrl}?api_key=${encodeURIComponent(data.apiKey)}`;
+      const wsUrl = `${data.websocketUrl}?x-goog-api-key=${encodeURIComponent(data.apiKey)}`;
       webSocket = new WebSocket(wsUrl);
 
       webSocket.onopen = () => {
